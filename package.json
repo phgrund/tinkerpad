@@ -10,16 +10,23 @@
   "categories": [
     "Other"
   ],
-  "activationEvents": [],
   "main": "./dist/extension.js",
   "contributes": {
     "commands": [
       {
-        "command": "tinkerpad.helloWorld",
-        "title": "Hello World"
+        "command": "tinkerpad.runCurrentFile",
+        "title": "Tinkerpad: Run Current File"
+      },
+      {
+        "command": "tinkerpad.runCurrentFileVerbose",
+        "title": "Tinkerpad: Run Current File (Verbose -vvv)"
       }
     ]
   },
+  "activationEvents": [
+    "onCommand:tinkerpad.runCurrentFile",
+    "onCommand:tinkerpad.runCurrentFileVerbose"
+  ],
   "scripts": {
     "vscode:prepublish": "yarn run package",
     "compile": "yarn run check-types && yarn run lint && node esbuild.js",
