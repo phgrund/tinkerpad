@@ -6,13 +6,26 @@ VS Code extension to execute the current `.php` file from a `.tinkerpad` folder 
 
 - **Tinkerpad: Run Current File**
   - Runs with `php artisan tinker`
-- **Tinkerpad: Run Current File (Verbose -vvv)**
-  - Runs with `php artisan tinker -vvv`
+
+## Configuration
+
+Create `.tinkerpad/config.json` in your workspace to customize the command used to start Tinker and enable verbose mode:
+
+```json
+{
+  "command": "./vendor/bin/sail artisan tinker",
+  "verbose": false
+}
+```
+
+If the file or `command` value is missing, Tinkerpad uses `php artisan tinker`.
+If `verbose` is missing, Tinkerpad uses `false`.
 
 ## Behavior
 
 - Only runs when the active file is a `.php` file inside a `.tinkerpad` directory.
-- Removes the leading `<?php` from the file before sending content to Tinker.
-- Creates an interactive terminal for each execution and keeps it open.
-- If you run again, the previous execution terminal is closed and a new one is created.
-- Uses a quoted heredoc to preserve content as-is, supporting single quotes, double quotes, heredoc, and nowdoc syntax in the input file.
+- Shows `Run Tinkerpad` at the top of runnable files.
+- Closes the previous Tinkerpad terminal before each run.
+- Saves and executes the current `.tinkerpad` file by path, so the file code is not printed in the terminal.
+- Starts a fresh Tinker session after the run, so you can continue typing in Tinker after the output appears.
+- Reads `.tinkerpad/config.json` to customize the Tinker command and verbose mode.

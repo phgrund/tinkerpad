@@ -16,16 +16,11 @@
       {
         "command": "tinkerpad.runCurrentFile",
         "title": "Tinkerpad: Run Current File"
-      },
-      {
-        "command": "tinkerpad.runCurrentFileVerbose",
-        "title": "Tinkerpad: Run Current File (Verbose -vvv)"
       }
     ]
   },
   "activationEvents": [
-    "onCommand:tinkerpad.runCurrentFile",
-    "onCommand:tinkerpad.runCurrentFileVerbose"
+    "onLanguage:php"
   ],
   "scripts": {
     "vscode:prepublish": "yarn run package",
