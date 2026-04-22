@@ -6,6 +6,8 @@ VS Code extension to execute the current `.php` file from a `.tinkerpad` folder 
 
 - **Tinkerpad: Run Current File**
   - Runs with `php artisan tinker`
+- **Run Tinkerpad** CodeLens
+  - Appears at the top of `.php` files inside `.tinkerpad`
 
 ## Configuration
 
@@ -21,10 +23,18 @@ Create `.tinkerpad/config.json` in your workspace to customize the command used 
 If the file or `command` value is missing, Tinkerpad uses `php artisan tinker`.
 If `verbose` is missing, Tinkerpad uses `false`.
 
+You can also disable the editor CodeLens from VS Code settings:
+
+```json
+{
+  "tinkerpad.codeLens.enabled": false
+}
+```
+
 ## Behavior
 
 - Only runs when the active file is a `.php` file inside a `.tinkerpad` directory.
-- Shows `Run Tinkerpad` at the top of runnable files.
+- Shows `Run Tinkerpad` at the top of runnable files when `tinkerpad.codeLens.enabled` is enabled.
 - Closes the previous Tinkerpad terminal before each run.
 - Saves and executes the current `.tinkerpad` file by path, so the file code is not printed in the terminal.
 - Starts a fresh Tinker session after the run, so you can continue typing in Tinker after the output appears.

@@ -2,13 +2,21 @@ import * as vscode from 'vscode';
 import * as path from 'path';
 
 let activeExecutionTerminal: vscode.Terminal | undefined;
+let warnedAboutDisabledEditorCodeLens = false;
 
 const RUN_COMMAND = 'tinkerpad.runCurrentFile';
+const DIAGNOSE_CODE_LENS_COMMAND = 'tinkerpad.diagnoseCodeLens';
 const TERMINAL_NAME = 'Tinkerpad';
 const DEFAULT_TINKER_COMMAND = 'php artisan tinker';
 const DEFAULT_VERBOSE = false;
 const CONFIG_DIRECTORY = '.tinkerpad';
 const CONFIG_FILE = 'config.json';
+const CODE_LENS_ENABLED_CONFIG = 'codeLens.enabled';
+const OPEN_SETTINGS_ACTION = 'Open Settings';
+const CODE_LENS_DOCUMENT_SELECTOR: vscode.DocumentSelector = [
+  { language: 'php' },
+  { pattern: '**/*.php' }
+];
 
 type TinkerpadConfig = {
   command: string;
@@ -20,18 +28,51 @@ export function activate(context: vscode.ExtensionContext): void {
     await executeCurrentTinkerpadFile(uri);
   });
 
+  const diagnoseCodeLens = vscode.commands.registerCommand(DIAGNOSE_CODE_LENS_COMMAND, async () => {
+    await diagnoseCurrentCodeLens();
+  });
+
+  const codeLensProvider = new TinkerpadCodeLensProvider();
+
   const terminalCloseListener = vscode.window.onDidCloseTerminal((terminal) => {
     if (terminal === activeExecutionTerminal) {
       activeExecutionTerminal = undefined;
     }
   });
 
-  const codeLensProvider = vscode.languages.registerCodeLensProvider(
-    { language: 'php', scheme: 'file' },
-    new TinkerpadCodeLensProvider()
+  const codeLensRegistration = vscode.languages.registerCodeLensProvider(
+    CODE_LENS_DOCUMENT_SELECTOR,
+    codeLensProvider
   );
 
-  context.subscriptions.push(runNormal, terminalCloseListener, codeLensProvider);
+  const configurationListener = vscode.workspace.onDidChangeConfiguration((event) => {
+    if (event.affectsConfiguration(`tinkerpad.${CODE_LENS_ENABLED_CONFIG}`)) {
+      codeLensProvider.refresh();
+    }
+  });
+
+  const activeEditorListener = vscode.window.onDidChangeActiveTextEditor((editor) => {
+    warnIfEditorCodeLensIsDisabled(editor);
+    codeLensProvider.refresh();
+  });
+
+  const documentOpenListener = vscode.workspace.onDidOpenTextDocument(() => {
+    codeLensProvider.refresh();
+  });
+
+  setTimeout(() => codeLensProvider.refresh(), 0);
+  warnIfEditorCodeLensIsDisabled(vscode.window.activeTextEditor);
+
+  context.subscriptions.push(
+    runNormal,
+    diagnoseCodeLens,
+    terminalCloseListener,
+    codeLensProvider,
+    codeLensRegistration,
+    configurationListener,
+    activeEditorListener,
+    documentOpenListener
+  );
 }
 
 export function deactivate(): void {
@@ -185,13 +226,29 @@ function buildTinkerCommand(config: TinkerpadConfig): string {
   return `${config.command} -vvv`;
 }
 
-class TinkerpadCodeLensProvider implements vscode.CodeLensProvider {
+class TinkerpadCodeLensProvider implements vscode.CodeLensProvider, vscode.Disposable {
+  private readonly changeEmitter = new vscode.EventEmitter<void>();
+
+  readonly onDidChangeCodeLenses = this.changeEmitter.event;
+
+  refresh(): void {
+    this.changeEmitter.fire();
+  }
+
+  dispose(): void {
+    this.changeEmitter.dispose();
+  }
+
   provideCodeLenses(document: vscode.TextDocument): vscode.CodeLens[] {
+    if (!isCodeLensEnabled()) {
+      return [];
+    }
+
     if (!isRunnableTinkerpadFile(document)) {
       return [];
     }
 
-    const topOfFile = new vscode.Range(0, 0, 0, 0);
+    const topOfFile = document.lineAt(0).range;
 
     return [
       new vscode.CodeLens(topOfFile, {
@@ -201,4 +258,84 @@ class TinkerpadCodeLensProvider implements vscode.CodeLensProvider {
       })
     ];
   }
+}
+
+function isCodeLensEnabled(): boolean {
+  return vscode.workspace.getConfiguration('tinkerpad').get<boolean>(CODE_LENS_ENABLED_CONFIG, true);
+}
+
+function isEditorCodeLensEnabled(document: vscode.TextDocument): boolean {
+  return vscode.workspace.getConfiguration('editor', document.uri).get<boolean>('codeLens', true);
+}
+
+function warnIfEditorCodeLensIsDisabled(editor: vscode.TextEditor | undefined): void {
+  const document = editor?.document;
+
+  if (!document || warnedAboutDisabledEditorCodeLens || !isCodeLensEnabled() || !isRunnableTinkerpadFile(document)) {
+    return;
+  }
+
+  if (isEditorCodeLensEnabled(document)) {
+    return;
+  }
+
+  warnedAboutDisabledEditorCodeLens = true;
+  vscode.window
+    .showWarningMessage(
+      'VS Code CodeLens is disabled. Enable "Editor: Code Lens" to show Run Tinkerpad above .tinkerpad PHP files.',
+      OPEN_SETTINGS_ACTION
+    )
+    .then((action) => {
+      if (action === OPEN_SETTINGS_ACTION) {
+        vscode.commands.executeCommand('workbench.action.openSettings', 'editor.codeLens');
+      }
+    });
+}
+
+async function diagnoseCurrentCodeLens(): Promise<void> {
+  const document = vscode.window.activeTextEditor?.document;
+  const output = vscode.window.createOutputChannel('Tinkerpad Diagnostics');
+
+  output.clear();
+  output.appendLine('Tinkerpad CodeLens diagnostics');
+  output.appendLine('================================');
+
+  if (!document) {
+    output.appendLine('No active editor found.');
+    output.show(true);
+    vscode.window.showWarningMessage('No active editor found for Tinkerpad CodeLens diagnostics.');
+    return;
+  }
+
+  output.appendLine(`uri: ${document.uri.toString(true)}`);
+  output.appendLine(`scheme: ${document.uri.scheme}`);
+  output.appendLine(`fileName: ${document.fileName}`);
+  output.appendLine(`languageId: ${document.languageId}`);
+  output.appendLine(`isUntitled: ${document.isUntitled}`);
+  output.appendLine(`workspaceFolder: ${vscode.workspace.getWorkspaceFolder(document.uri)?.uri.toString(true) ?? '(none)'}`);
+  output.appendLine(`selectorMatchScore: ${vscode.languages.match(CODE_LENS_DOCUMENT_SELECTOR, document)}`);
+  output.appendLine(`isRunnableTinkerpadFile: ${isRunnableTinkerpadFile(document)}`);
+  output.appendLine(`tinkerpad.codeLens.enabled: ${isCodeLensEnabled()}`);
+  output.appendLine(`editor.codeLens: ${isEditorCodeLensEnabled(document)}`);
+
+  try {
+    const lenses = await vscode.commands.executeCommand<vscode.CodeLens[]>(
+      'vscode.executeCodeLensProvider',
+      document.uri
+    );
+    const allLenses = lenses ?? [];
+    const tinkerpadLenses = allLenses.filter((lens) => lens.command?.command === RUN_COMMAND);
+
+    output.appendLine(`executeCodeLensProvider total: ${allLenses.length}`);
+    output.appendLine(`executeCodeLensProvider tinkerpad: ${tinkerpadLenses.length}`);
+
+    for (const lens of tinkerpadLenses) {
+      output.appendLine(`tinkerpadLens: ${lens.command?.title ?? '(no title)'} at line ${lens.range.start.line + 1}`);
+    }
+  } catch (error) {
+    output.appendLine(`executeCodeLensProvider error: ${error instanceof Error ? error.message : String(error)}`);
+  }
+
+  output.show(true);
+  vscode.window.showInformationMessage('Tinkerpad CodeLens diagnostics written to the Tinkerpad Diagnostics output.');
 }

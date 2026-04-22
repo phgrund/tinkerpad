@@ -16,11 +16,25 @@
       {
         "command": "tinkerpad.runCurrentFile",
         "title": "Tinkerpad: Run Current File"
+      },
+      {
+        "command": "tinkerpad.diagnoseCodeLens",
+        "title": "Tinkerpad: Diagnose CodeLens"
       }
-    ]
+    ],
+    "configuration": {
+      "title": "Tinkerpad",
+      "properties": {
+        "tinkerpad.codeLens.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show a CodeLens action to run Tinkerpad files from the editor."
+        }
+      }
+    }
   },
   "activationEvents": [
-    "onLanguage:php"
+    "*"
   ],
   "scripts": {
     "vscode:prepublish": "yarn run package",
