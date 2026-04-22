@@ -34,7 +34,8 @@
     }
   },
   "activationEvents": [
-    "*"
+    "onLanguage:php",
+    "workspaceContains:**/.tinkerpad/**"
   ],
   "scripts": {
     "vscode:prepublish": "yarn run package",

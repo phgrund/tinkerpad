@@ -3,6 +3,7 @@ import * as path from 'path';
 
 let activeExecutionTerminal: TinkerpadTerminal | undefined;
 let warnedAboutDisabledEditorCodeLens = false;
+let diagnosticsOutputChannel: vscode.OutputChannel | undefined;
 
 const RUN_COMMAND = 'tinkerpad.runCurrentFile';
 const DIAGNOSE_CODE_LENS_COMMAND = 'tinkerpad.diagnoseCodeLens';
@@ -63,6 +64,11 @@ export function activate(context: vscode.ExtensionContext): void {
     if (event.affectsConfiguration(`tinkerpad.${CODE_LENS_ENABLED_CONFIG}`)) {
       codeLensProvider.refresh();
     }
+
+    if (event.affectsConfiguration('editor.codeLens')) {
+      warnedAboutDisabledEditorCodeLens = false;
+      warnIfEditorCodeLensIsDisabled(vscode.window.activeTextEditor);
+    }
   });
 
   const activeEditorListener = vscode.window.onDidChangeActiveTextEditor((editor) => {
@@ -91,6 +97,16 @@ export function activate(context: vscode.ExtensionContext): void {
 
 export function deactivate(): void {
   activeExecutionTerminal = undefined;
+  diagnosticsOutputChannel?.dispose();
+  diagnosticsOutputChannel = undefined;
+}
+
+function getDiagnosticsOutputChannel(): vscode.OutputChannel {
+  if (!diagnosticsOutputChannel) {
+    diagnosticsOutputChannel = vscode.window.createOutputChannel('Tinkerpad Diagnostics');
+  }
+
+  return diagnosticsOutputChannel;
 }
 
 async function executeCurrentTinkerpadFile(uri?: vscode.Uri): Promise<void> {
@@ -318,21 +334,23 @@ function warnIfEditorCodeLensIsDisabled(editor: vscode.TextEditor | undefined): 
   }
 
   warnedAboutDisabledEditorCodeLens = true;
-  vscode.window
-    .showWarningMessage(
-      'VS Code CodeLens is disabled. Enable "Editor: Code Lens" to show Run Tinkerpad above .tinkerpad PHP files.',
-      OPEN_SETTINGS_ACTION
-    )
-    .then((action) => {
-      if (action === OPEN_SETTINGS_ACTION) {
-        vscode.commands.executeCommand('workbench.action.openSettings', 'editor.codeLens');
-      }
-    });
+  void promptToEnableEditorCodeLens();
+}
+
+async function promptToEnableEditorCodeLens(): Promise<void> {
+  const action = await vscode.window.showWarningMessage(
+    'VS Code CodeLens is disabled. Enable "Editor: Code Lens" to show Run Tinkerpad above .tinkerpad PHP files.',
+    OPEN_SETTINGS_ACTION
+  );
+
+  if (action === OPEN_SETTINGS_ACTION) {
+    await vscode.commands.executeCommand('workbench.action.openSettings', 'editor.codeLens');
+  }
 }
 
 async function diagnoseCurrentCodeLens(): Promise<void> {
   const document = vscode.window.activeTextEditor?.document;
-  const output = vscode.window.createOutputChannel('Tinkerpad Diagnostics');
+  const output = getDiagnosticsOutputChannel();
 
   output.clear();
   output.appendLine('Tinkerpad CodeLens diagnostics');
