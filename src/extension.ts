@@ -1,7 +1,7 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 
-let activeExecutionTerminal: vscode.Terminal | undefined;
+let activeExecutionTerminal: TinkerpadTerminal | undefined;
 let warnedAboutDisabledEditorCodeLens = false;
 
 const RUN_COMMAND = 'tinkerpad.runCurrentFile';
@@ -21,6 +21,20 @@ const CODE_LENS_DOCUMENT_SELECTOR: vscode.DocumentSelector = [
 type TinkerpadConfig = {
   command: string;
   verbose: boolean;
+};
+
+type TinkerpadTerminal = Pick<vscode.Terminal, 'show' | 'sendText' | 'dispose'>;
+
+type TinkerpadDocument = Pick<vscode.TextDocument, 'uri' | 'fileName' | 'languageId' | 'getText' | 'save'>;
+
+type TinkerpadWorkspaceFolder = Pick<vscode.WorkspaceFolder, 'uri'>;
+
+type TinkerpadExecutionServices = {
+  getWorkspaceFolder(uri: vscode.Uri): TinkerpadWorkspaceFolder | undefined;
+  getConfig(workspaceFolder: TinkerpadWorkspaceFolder): Promise<TinkerpadConfig | undefined>;
+  createTerminal(cwd: string): TinkerpadTerminal;
+  showErrorMessage(message: string): void;
+  showWarningMessage(message: string): void;
 };
 
 export function activate(context: vscode.ExtensionContext): void {
@@ -87,15 +101,22 @@ async function executeCurrentTinkerpadFile(uri?: vscode.Uri): Promise<void> {
     return;
   }
 
+  await executeTinkerpadDocument(document);
+}
+
+async function executeTinkerpadDocument(
+  document: TinkerpadDocument,
+  services: TinkerpadExecutionServices = defaultExecutionServices
+): Promise<void> {
   if (!isRunnableTinkerpadFile(document)) {
-    vscode.window.showErrorMessage('The active file must be a .php file inside a .tinkerpad folder.');
+    services.showErrorMessage('The active file must be a .php file inside a .tinkerpad folder.');
     return;
   }
 
-  const workspaceFolder = vscode.workspace.getWorkspaceFolder(document.uri);
+  const workspaceFolder = services.getWorkspaceFolder(document.uri);
 
   if (!workspaceFolder) {
-    vscode.window.showErrorMessage('Could not determine a workspace folder for the current file.');
+    services.showErrorMessage('Could not determine a workspace folder for the current file.');
     return;
   }
 
@@ -103,16 +124,16 @@ async function executeCurrentTinkerpadFile(uri?: vscode.Uri): Promise<void> {
   const contentWithoutPhpOpenTag = stripLeadingPhpOpenTag(rawContent);
 
   if (!contentWithoutPhpOpenTag.trim()) {
-    vscode.window.showWarningMessage('The current .tinkerpad file is empty after removing the opening <?php tag.');
+    services.showWarningMessage('The current .tinkerpad file is empty after removing the opening <?php tag.');
     return;
   }
 
   if (!await document.save()) {
-    vscode.window.showErrorMessage('Could not save the current .tinkerpad file before running it.');
+    services.showErrorMessage('Could not save the current .tinkerpad file before running it.');
     return;
   }
 
-  const config = await getTinkerpadConfig(workspaceFolder);
+  const config = await services.getConfig(workspaceFolder);
 
   if (!config) {
     return;
@@ -120,12 +141,27 @@ async function executeCurrentTinkerpadFile(uri?: vscode.Uri): Promise<void> {
 
   const artisanCommand = buildTinkerCommand(config);
   const runnableFilePath = getWorkspaceRelativePath(workspaceFolder, document);
-  const terminal = createFreshExecutionTerminal(workspaceFolder.uri.fsPath);
+  const terminal = createFreshExecutionTerminal(workspaceFolder.uri.fsPath, services.createTerminal);
 
   terminal.show(false);
   terminal.sendText(buildTinkerStartCommand(artisanCommand), true);
   terminal.sendText(buildTinkerRequireCommand(runnableFilePath), true);
 }
+
+const defaultExecutionServices: TinkerpadExecutionServices = {
+  getWorkspaceFolder: (uri) => vscode.workspace.getWorkspaceFolder(uri),
+  getConfig: getTinkerpadConfig,
+  createTerminal: (cwd) => vscode.window.createTerminal({
+    name: TERMINAL_NAME,
+    cwd
+  }),
+  showErrorMessage: (message) => {
+    void vscode.window.showErrorMessage(message);
+  },
+  showWarningMessage: (message) => {
+    void vscode.window.showWarningMessage(message);
+  }
+};
 
 async function getTargetDocument(uri?: vscode.Uri): Promise<vscode.TextDocument | undefined> {
   if (uri) {
@@ -135,21 +171,21 @@ async function getTargetDocument(uri?: vscode.Uri): Promise<vscode.TextDocument 
   return vscode.window.activeTextEditor?.document;
 }
 
-function createFreshExecutionTerminal(cwd: string): vscode.Terminal {
+function createFreshExecutionTerminal(
+  cwd: string,
+  createTerminal: TinkerpadExecutionServices['createTerminal'] = defaultExecutionServices.createTerminal
+): TinkerpadTerminal {
   if (activeExecutionTerminal) {
     activeExecutionTerminal.dispose();
     activeExecutionTerminal = undefined;
   }
 
-  activeExecutionTerminal = vscode.window.createTerminal({
-    name: TERMINAL_NAME,
-    cwd
-  });
+  activeExecutionTerminal = createTerminal(cwd);
 
   return activeExecutionTerminal;
 }
 
-function isRunnableTinkerpadFile(document: vscode.TextDocument): boolean {
+function isRunnableTinkerpadFile(document: Pick<vscode.TextDocument, 'languageId' | 'fileName' | 'uri'>): boolean {
   if (document.languageId !== 'php' && !document.fileName.toLowerCase().endsWith('.php')) {
     return false;
   }
@@ -162,7 +198,7 @@ function stripLeadingPhpOpenTag(content: string): string {
   return content.replace(/^\uFEFF?\s*<\?php\b\s*/, '');
 }
 
-function getWorkspaceRelativePath(workspaceFolder: vscode.WorkspaceFolder, document: vscode.TextDocument): string {
+function getWorkspaceRelativePath(workspaceFolder: TinkerpadWorkspaceFolder, document: Pick<vscode.TextDocument, 'uri'>): string {
   return path.relative(workspaceFolder.uri.fsPath, document.uri.fsPath).replace(/\\/g, '/');
 }
 
@@ -178,7 +214,7 @@ function quoteForPhpString(value: string): string {
   return `'${value.replace(/\\/g, '\\\\').replace(/'/g, "\\'")}'`;
 }
 
-async function getTinkerpadConfig(workspaceFolder: vscode.WorkspaceFolder): Promise<TinkerpadConfig | undefined> {
+async function getTinkerpadConfig(workspaceFolder: TinkerpadWorkspaceFolder): Promise<TinkerpadConfig | undefined> {
   const configUri = vscode.Uri.joinPath(workspaceFolder.uri, CONFIG_DIRECTORY, CONFIG_FILE);
 
   try {
@@ -341,3 +377,19 @@ async function diagnoseCurrentCodeLens(): Promise<void> {
   output.show(true);
   vscode.window.showInformationMessage('Tinkerpad CodeLens diagnostics written to the Tinkerpad Diagnostics output.');
 }
+
+export const __test = {
+  buildTinkerCommand,
+  buildTinkerRequireCommand,
+  buildTinkerStartCommand,
+  createFreshExecutionTerminal,
+  executeTinkerpadDocument,
+  getWorkspaceRelativePath,
+  isRunnableTinkerpadFile,
+  quoteForPhpString,
+  resetState: () => {
+    activeExecutionTerminal = undefined;
+    warnedAboutDisabledEditorCodeLens = false;
+  },
+  stripLeadingPhpOpenTag
+};
