@@ -1,0 +1,39 @@
+{
+  "name": "tinkerpad-runner",
+  "displayName": "Tinkerpad Runner",
+  "description": "Run .tinkerpad PHP files through Laravel Artisan Tinker.",
+  "version": "0.0.1",
+  "publisher": "local",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onCommand:tinkerpad.runCurrentFile",
+    "onCommand:tinkerpad.runCurrentFileVerbose"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "tinkerpad.runCurrentFile",
+        "title": "Tinkerpad: Run Current File"
+      },
+      {
+        "command": "tinkerpad.runCurrentFileVerbose",
+        "title": "Tinkerpad: Run Current File (Verbose -vvv)"
+      }
+    ]
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.2",
+    "@types/vscode": "^1.90.0",
+    "typescript": "^5.4.5"
+  }
+}
