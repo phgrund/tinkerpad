@@ -123,7 +123,8 @@ async function executeCurrentTinkerpadFile(uri?: vscode.Uri): Promise<void> {
   const terminal = createFreshExecutionTerminal(workspaceFolder.uri.fsPath);
 
   terminal.show(false);
-  terminal.sendText(buildHiddenExecutionCommand(artisanCommand, runnableFilePath), true);
+  terminal.sendText(buildTinkerStartCommand(artisanCommand), true);
+  terminal.sendText(buildTinkerRequireCommand(runnableFilePath), true);
 }
 
 async function getTargetDocument(uri?: vscode.Uri): Promise<vscode.TextDocument | undefined> {
@@ -165,15 +166,16 @@ function getWorkspaceRelativePath(workspaceFolder: vscode.WorkspaceFolder, docum
   return path.relative(workspaceFolder.uri.fsPath, document.uri.fsPath).replace(/\\/g, '/');
 }
 
-function buildHiddenExecutionCommand(artisanCommand: string, runnableFilePath: string): string {
-  const phpStatement = `require base_path(${JSON.stringify(runnableFilePath)});`;
-  const executeCommand = `${artisanCommand} --execute=${quoteForShell(phpStatement)}`;
-
-  return `clear; ${executeCommand}; ${artisanCommand}`;
+function buildTinkerStartCommand(artisanCommand: string): string {
+  return `clear; ${artisanCommand}`;
 }
 
-function quoteForShell(value: string): string {
-  return `'${value.replace(/'/g, "'\\''")}'`;
+function buildTinkerRequireCommand(runnableFilePath: string): string {
+  return `require base_path(${quoteForPhpString(runnableFilePath)});`;
+}
+
+function quoteForPhpString(value: string): string {
+  return `'${value.replace(/\\/g, '\\\\').replace(/'/g, "\\'")}'`;
 }
 
 async function getTinkerpadConfig(workspaceFolder: vscode.WorkspaceFolder): Promise<TinkerpadConfig | undefined> {

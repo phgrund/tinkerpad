@@ -37,5 +37,5 @@ You can also disable the editor CodeLens from VS Code settings:
 - Shows `Run Tinkerpad` at the top of runnable files when `tinkerpad.codeLens.enabled` is enabled.
 - Closes the previous Tinkerpad terminal before each run.
 - Saves and executes the current `.tinkerpad` file by path, so the file code is not printed in the terminal.
-- Starts a fresh Tinker session after the run, so you can continue typing in Tinker after the output appears.
+- Starts an interactive Tinker session, runs the current file inside it, and keeps that same session open.
 - Reads `.tinkerpad/config.json` to customize the Tinker command and verbose mode.
