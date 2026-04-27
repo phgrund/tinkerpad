@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
+import { spawn } from 'child_process';
 
 let activeExecutionTerminal: TinkerpadTerminal | undefined;
 let warnedAboutDisabledEditorCodeLens = false;
@@ -9,6 +10,7 @@ const RUN_COMMAND = 'tinkerpad.runCurrentFile';
 const DIAGNOSE_CODE_LENS_COMMAND = 'tinkerpad.diagnoseCodeLens';
 const TERMINAL_NAME = 'Tinkerpad';
 const DEFAULT_TINKER_COMMAND = 'php artisan tinker';
+const LEGACY_COMMAND_CONFIG_KEY = 'command';
 const DEFAULT_VERBOSE = false;
 const CONFIG_DIRECTORY = '.tinkerpad';
 const CONFIG_FILE = 'config.json';
@@ -19,9 +21,22 @@ const CODE_LENS_DOCUMENT_SELECTOR: vscode.DocumentSelector = [
   { pattern: '**/*.php' }
 ];
 
+type TinkerpadMode = 'local' | 'kubernetes';
+
+type KubernetesConfig = {
+  context: string;
+  namespace: string;
+  podNamePrefix: string;
+  container: string;
+  remoteTempDirectory: string;
+};
+
 type TinkerpadConfig = {
-  command: string;
+  mode: TinkerpadMode;
+  localCommand: string;
+  kubernetesCommand: string;
   verbose: boolean;
+  kubernetes?: KubernetesConfig;
 };
 
 type TinkerpadTerminal = Pick<vscode.Terminal, 'show' | 'sendText' | 'dispose'>;
@@ -30,10 +45,24 @@ type TinkerpadDocument = Pick<vscode.TextDocument, 'uri' | 'fileName' | 'languag
 
 type TinkerpadWorkspaceFolder = Pick<vscode.WorkspaceFolder, 'uri'>;
 
+type ProcessExecutionResult = {
+  stderr: string;
+  stdout: string;
+};
+
+type ProcessExecutionOptions = {
+  input?: string;
+};
+
+type ConfigErrorReporter = (message: string) => void;
+type ModePrompt = () => Promise<TinkerpadMode | undefined>;
+
 type TinkerpadExecutionServices = {
   getWorkspaceFolder(uri: vscode.Uri): TinkerpadWorkspaceFolder | undefined;
   getConfig(workspaceFolder: TinkerpadWorkspaceFolder): Promise<TinkerpadConfig | undefined>;
   createTerminal(cwd: string): TinkerpadTerminal;
+  getCurrentTimestamp(): number;
+  runProcess(command: string, args: string[], options?: ProcessExecutionOptions): Promise<ProcessExecutionResult>;
   showErrorMessage(message: string): void;
   showWarningMessage(message: string): void;
 };
@@ -156,9 +185,14 @@ async function executeTinkerpadDocument(
   }
 
   const artisanCommand = buildTinkerCommand(config);
+
+  if (config.mode === 'kubernetes') {
+    await executeKubernetesTinkerpadDocument(rawContent, artisanCommand, config, workspaceFolder, services);
+    return;
+  }
+
   const runnableFilePath = getWorkspaceRelativePath(workspaceFolder, document);
   const terminal = createFreshExecutionTerminal(workspaceFolder.uri.fsPath, services.createTerminal);
-
   terminal.show(false);
   terminal.sendText(buildTinkerStartCommand(artisanCommand), true);
   terminal.sendText(buildTinkerRequireCommand(runnableFilePath), true);
@@ -171,6 +205,8 @@ const defaultExecutionServices: TinkerpadExecutionServices = {
     name: TERMINAL_NAME,
     cwd
   }),
+  getCurrentTimestamp: () => Date.now(),
+  runProcess,
   showErrorMessage: (message) => {
     void vscode.window.showErrorMessage(message);
   },
@@ -226,8 +262,16 @@ function buildTinkerRequireCommand(runnableFilePath: string): string {
   return `require base_path(${quoteForPhpString(runnableFilePath)});`;
 }
 
+function buildDirectRequireCommand(filePath: string): string {
+  return `require ${quoteForPhpString(filePath)};`;
+}
+
 function quoteForPhpString(value: string): string {
   return `'${value.replace(/\\/g, '\\\\').replace(/'/g, "\\'")}'`;
+}
+
+function quoteForShell(value: string): string {
+  return `'${value.replace(/'/g, "'\\''")}'`;
 }
 
 async function getTinkerpadConfig(workspaceFolder: TinkerpadWorkspaceFolder): Promise<TinkerpadConfig | undefined> {
@@ -236,28 +280,15 @@ async function getTinkerpadConfig(workspaceFolder: TinkerpadWorkspaceFolder): Pr
   try {
     const configBytes = await vscode.workspace.fs.readFile(configUri);
     const configContent = Buffer.from(configBytes).toString('utf8');
-    const config = JSON.parse(configContent) as { command?: unknown; verbose?: unknown };
-    const command = config.command ?? DEFAULT_TINKER_COMMAND;
-    const verbose = config.verbose ?? DEFAULT_VERBOSE;
+    const config = await resolvePromptedTinkerpadMode(JSON.parse(configContent) as Record<string, unknown>);
 
-    if (typeof command !== 'string' || !command.trim()) {
-      vscode.window.showErrorMessage('The .tinkerpad/config.json "command" value must be a non-empty string.');
-      return undefined;
-    }
-
-    if (typeof verbose !== 'boolean') {
-      vscode.window.showErrorMessage('The .tinkerpad/config.json "verbose" value must be a boolean.');
-      return undefined;
-    }
-
-    return {
-      command: command.trim(),
-      verbose
-    };
+    return config ? parseTinkerpadConfig(config) : undefined;
   } catch (error) {
     if (error instanceof vscode.FileSystemError && error.code === 'FileNotFound') {
       return {
-        command: DEFAULT_TINKER_COMMAND,
+        mode: 'local',
+        localCommand: DEFAULT_TINKER_COMMAND,
+        kubernetesCommand: DEFAULT_TINKER_COMMAND,
         verbose: DEFAULT_VERBOSE
       };
     }
@@ -272,12 +303,317 @@ async function getTinkerpadConfig(workspaceFolder: TinkerpadWorkspaceFolder): Pr
   }
 }
 
-function buildTinkerCommand(config: TinkerpadConfig): string {
-  if (!config.verbose) {
-    return config.command;
+async function promptForTinkerpadMode(): Promise<TinkerpadMode | undefined> {
+  const mode = await vscode.window.showQuickPick(['local', 'kubernetes'], {
+    placeHolder: 'Where should Tinkerpad run this file?'
+  });
+
+  if (mode !== 'local' && mode !== 'kubernetes') {
+    return undefined;
   }
 
-  return `${config.command} -vvv`;
+  return mode;
+}
+
+async function resolvePromptedTinkerpadMode(
+  config: Record<string, unknown>,
+  prompt: ModePrompt = promptForTinkerpadMode
+): Promise<Record<string, unknown> | undefined> {
+  if (config.mode !== null) {
+    return config;
+  }
+
+  const mode = await prompt();
+
+  if (!mode) {
+    return undefined;
+  }
+
+  return { ...config, mode };
+}
+
+function parseTinkerpadConfig(
+  config: Record<string, unknown>,
+  showErrorMessage: ConfigErrorReporter = showConfigErrorMessage
+): TinkerpadConfig | undefined {
+  const mode = config.mode === undefined ? 'local' : config.mode;
+  const legacyCommand = config[LEGACY_COMMAND_CONFIG_KEY];
+  const localCommand = config.localCommand ?? legacyCommand ?? DEFAULT_TINKER_COMMAND;
+  const kubernetesCommand = config.kubernetesCommand ?? legacyCommand ?? DEFAULT_TINKER_COMMAND;
+  const verbose = config.verbose ?? DEFAULT_VERBOSE;
+
+  if (mode !== 'local' && mode !== 'kubernetes') {
+    showErrorMessage('The .tinkerpad/config.json "mode" value must be either "local" or "kubernetes".');
+    return undefined;
+  }
+
+  if (legacyCommand !== undefined && (typeof legacyCommand !== 'string' || !legacyCommand.trim())) {
+    showErrorMessage('The .tinkerpad/config.json "command" value must be a non-empty string.');
+    return undefined;
+  }
+
+  if (typeof localCommand !== 'string' || !localCommand.trim()) {
+    showErrorMessage('The .tinkerpad/config.json "localCommand" value must be a non-empty string.');
+    return undefined;
+  }
+
+  if (typeof kubernetesCommand !== 'string' || !kubernetesCommand.trim()) {
+    showErrorMessage('The .tinkerpad/config.json "kubernetesCommand" value must be a non-empty string.');
+    return undefined;
+  }
+
+  if (typeof verbose !== 'boolean') {
+    showErrorMessage('The .tinkerpad/config.json "verbose" value must be a boolean.');
+    return undefined;
+  }
+
+  if (mode === 'local') {
+    return {
+      mode,
+      localCommand: localCommand.trim(),
+      kubernetesCommand: kubernetesCommand.trim(),
+      verbose
+    };
+  }
+
+  const kubernetes = parseKubernetesConfig(config.kubernetes, showErrorMessage);
+
+  if (!kubernetes) {
+    return undefined;
+  }
+
+  return {
+    mode,
+    localCommand: localCommand.trim(),
+    kubernetesCommand: kubernetesCommand.trim(),
+    verbose,
+    kubernetes
+  };
+}
+
+function parseKubernetesConfig(config: unknown, showErrorMessage: ConfigErrorReporter): KubernetesConfig | undefined {
+  if (!config || typeof config !== 'object' || Array.isArray(config)) {
+    showErrorMessage('The .tinkerpad/config.json "kubernetes" value must be an object.');
+    return undefined;
+  }
+
+  const rawConfig = config as Record<string, unknown>;
+  const context = readRequiredString(rawConfig, 'kubernetes.context', showErrorMessage);
+  const namespace = readRequiredString(rawConfig, 'kubernetes.namespace', showErrorMessage);
+  const podNamePrefix = readRequiredString(rawConfig, 'kubernetes.podNamePrefix', showErrorMessage);
+  const container = readRequiredString(rawConfig, 'kubernetes.container', showErrorMessage);
+  const remoteTempDirectory = readRequiredString(rawConfig, 'kubernetes.remoteTempDirectory', showErrorMessage);
+
+  if (!context || !namespace || !podNamePrefix || !container || !remoteTempDirectory) {
+    return undefined;
+  }
+
+  return {
+    context,
+    namespace,
+    podNamePrefix,
+    container,
+    remoteTempDirectory: trimTrailingSlashes(remoteTempDirectory)
+  };
+}
+
+function readRequiredString(
+  config: Record<string, unknown>,
+  dottedKey: string,
+  showErrorMessage: ConfigErrorReporter
+): string | undefined {
+  const key = dottedKey.split('.').at(-1);
+  const value = key ? config[key] : undefined;
+
+  if (typeof value === 'string' && value.trim()) {
+    return value.trim();
+  }
+
+  showErrorMessage(`The .tinkerpad/config.json "${dottedKey}" value must be a non-empty string.`);
+  return undefined;
+}
+
+function showConfigErrorMessage(message: string): void {
+  void vscode.window.showErrorMessage(message);
+}
+
+function trimTrailingSlashes(value: string): string {
+  const trimmed = value.replace(/\/+$/, '');
+
+  return trimmed || '/';
+}
+
+function buildTinkerCommand(config: TinkerpadConfig): string {
+  const command = config.mode === 'kubernetes' ? config.kubernetesCommand : config.localCommand;
+
+  if (!config.verbose) {
+    return command;
+  }
+
+  return `${command} -vvv`;
+}
+
+async function executeKubernetesTinkerpadDocument(
+  rawContent: string,
+  artisanCommand: string,
+  config: TinkerpadConfig,
+  workspaceFolder: TinkerpadWorkspaceFolder,
+  services: TinkerpadExecutionServices
+): Promise<void> {
+  if (!config.kubernetes) {
+    services.showErrorMessage('The .tinkerpad/config.json "kubernetes" value is required when "mode" is "kubernetes".');
+    return;
+  }
+
+  try {
+    const pod = await findKubernetesPod(config.kubernetes, services.runProcess);
+
+    if (!pod) {
+      services.showErrorMessage(
+        `No pod starting with "${config.kubernetes.podNamePrefix}" found in namespace "${config.kubernetes.namespace}".`
+      );
+      return;
+    }
+
+    const remoteFilePath = buildRemoteTempFilePath(config.kubernetes.remoteTempDirectory, services.getCurrentTimestamp());
+
+    await uploadKubernetesTinkerpadFile(config.kubernetes, pod, remoteFilePath, rawContent, services.runProcess);
+
+    const terminal = createFreshExecutionTerminal(workspaceFolder.uri.fsPath, services.createTerminal);
+
+    terminal.show(false);
+    terminal.sendText(buildTinkerStartCommand(buildKubernetesTinkerCommand(config.kubernetes, pod, artisanCommand)), true);
+    terminal.sendText(buildDirectRequireCommand(remoteFilePath), true);
+  } catch (error) {
+    services.showErrorMessage(`Could not run Tinkerpad in Kubernetes: ${getErrorMessage(error)}`);
+  }
+}
+
+async function findKubernetesPod(
+  config: KubernetesConfig,
+  runProcess: TinkerpadExecutionServices['runProcess']
+): Promise<string | undefined> {
+  const result = await runProcess('kubectl', buildKubernetesGetPodsArgs(config));
+  const podPrefix = `pod/${config.podNamePrefix}`;
+  const podLine = result.stdout
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .find((line) => line.startsWith(podPrefix));
+
+  return podLine?.replace(/^pod\//, '');
+}
+
+async function uploadKubernetesTinkerpadFile(
+  config: KubernetesConfig,
+  pod: string,
+  remoteFilePath: string,
+  content: string,
+  runProcess: TinkerpadExecutionServices['runProcess']
+): Promise<void> {
+  await runProcess('kubectl', buildKubernetesUploadArgs(config, pod, remoteFilePath), {
+    input: content
+  });
+}
+
+function buildRemoteTempFilePath(remoteTempDirectory: string, timestamp: number): string {
+  return path.posix.join(remoteTempDirectory, `tinkerpad-${timestamp}.php`);
+}
+
+function buildKubernetesGetPodsArgs(config: KubernetesConfig): string[] {
+  return [
+    '--context',
+    config.context,
+    '-n',
+    config.namespace,
+    'get',
+    'pods',
+    '-o',
+    'name'
+  ];
+}
+
+function buildKubernetesUploadArgs(config: KubernetesConfig, pod: string, remoteFilePath: string): string[] {
+  return [
+    '--context',
+    config.context,
+    '-n',
+    config.namespace,
+    'exec',
+    '-i',
+    pod,
+    '-c',
+    config.container,
+    '--',
+    'sh',
+    '-c',
+    `cat > ${quoteForShell(remoteFilePath)}`
+  ];
+}
+
+function buildKubernetesTinkerCommand(config: KubernetesConfig, pod: string, artisanCommand: string): string {
+  return [
+    'kubectl',
+    '--context',
+    quoteForShell(config.context),
+    '-n',
+    quoteForShell(config.namespace),
+    'exec',
+    '-it',
+    quoteForShell(pod),
+    '-c',
+    quoteForShell(config.container),
+    '--',
+    artisanCommand
+  ].join(' ');
+}
+
+function runProcess(
+  command: string,
+  args: string[],
+  options: ProcessExecutionOptions = {}
+): Promise<ProcessExecutionResult> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, {
+      stdio: ['pipe', 'pipe', 'pipe']
+    });
+
+    let stdout = '';
+    let stderr = '';
+
+    child.stdout.setEncoding('utf8');
+    child.stderr.setEncoding('utf8');
+
+    child.stdout.on('data', (chunk: string) => {
+      stdout += chunk;
+    });
+
+    child.stderr.on('data', (chunk: string) => {
+      stderr += chunk;
+    });
+
+    child.on('error', (error) => {
+      reject(error);
+    });
+
+    child.on('close', (code) => {
+      if (code === 0) {
+        resolve({ stdout, stderr });
+        return;
+      }
+
+      reject(new Error(stderr.trim() || `${command} exited with code ${code ?? 'unknown'}.`));
+    });
+
+    child.stdin.end(options.input ?? '');
+  });
+}
+
+function getErrorMessage(error: unknown): string {
+  if (error instanceof Error) {
+    return error.message;
+  }
+
+  return String(error);
 }
 
 class TinkerpadCodeLensProvider implements vscode.CodeLensProvider, vscode.Disposable {
@@ -397,6 +733,11 @@ async function diagnoseCurrentCodeLens(): Promise<void> {
 }
 
 export const __test = {
+  buildDirectRequireCommand,
+  buildKubernetesGetPodsArgs,
+  buildKubernetesTinkerCommand,
+  buildKubernetesUploadArgs,
+  buildRemoteTempFilePath,
   buildTinkerCommand,
   buildTinkerRequireCommand,
   buildTinkerStartCommand,
@@ -404,7 +745,9 @@ export const __test = {
   executeTinkerpadDocument,
   getWorkspaceRelativePath,
   isRunnableTinkerpadFile,
+  parseTinkerpadConfig,
   quoteForPhpString,
+  resolvePromptedTinkerpadMode,
   resetState: () => {
     activeExecutionTerminal = undefined;
     warnedAboutDisabledEditorCodeLens = false;
